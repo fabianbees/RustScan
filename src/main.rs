@@ -17,6 +17,7 @@ use std::fs::File;
 use std::io::{prelude::*, BufReader};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::Path;
+use std::str::FromStr;
 use std::string::ToString;
 use std::time::Duration;
 use trust_dns_resolver::{
@@ -281,7 +282,7 @@ fn parse_addresses(input: &Opts) -> Vec<IpAddr> {
 /// Call this every time you have a possible IP_or_host
 fn parse_address(address: &str, resolver: &Resolver) -> Vec<IpAddr> {
     IpCidr::from_str(address)
-        .map(|cidr| cidr.iter().collect())
+        .map(|cidr| cidr.iter().addresses().collect())
         .ok()
         .or_else(|| {
             format!("{}:{}", &address, 80)
@@ -355,8 +356,6 @@ fn adjust_ulimit_size(opts: &Opts) -> u64 {
 
 #[cfg(unix)]
 fn infer_batch_size(opts: &Opts, ulimit: u64) -> u16 {
-    use std::convert::TryInto;
-
     let mut batch_size: u64 = opts.batch_size.into();
 
     // Adjust the batch size when the ulimit value is lower than the desired batch size
