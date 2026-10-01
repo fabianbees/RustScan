@@ -26,6 +26,7 @@ extern crate dirs;
 #[cfg(unix)]
 const DEFAULT_FILE_DESCRIPTORS_LIMIT: usize = 8000;
 // Safest batch size based on experimentation
+#[cfg(unix)]
 const AVERAGE_BATCH_SIZE: usize = 3000;
 
 #[macro_use]
@@ -46,6 +47,11 @@ fn main() {
     let mut opts: Opts = Opts::read();
     let config = Config::read(opts.config_path.clone());
     opts.merge(&config);
+
+    if let Err(message) = opts.validate_platform() {
+        eprintln!("error: {message}");
+        std::process::exit(2);
+    }
 
     debug!("Main() `opts` arguments are {opts:?}");
 
@@ -78,11 +84,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    #[cfg(unix)]
-    let batch_size: usize = infer_batch_size(&opts, adjust_ulimit_size(&opts));
-
-    #[cfg(not(unix))]
-    let batch_size: usize = AVERAGE_BATCH_SIZE;
+    let batch_size = effective_batch_size(&opts);
+    debug!("Effective batch size: {batch_size}");
 
     let scanner = Scanner::new(
         &ips,
@@ -124,7 +127,7 @@ fn main() {
         \n*I used {} batch size, consider lowering it with {} or a comfortable number for your system.
         \n Alternatively, increase the timeout if your ping is high. Rustscan -t 2000 for 2000 milliseconds (2s) timeout.\n",
         ip,
-        opts.batch_size,
+        batch_size,
         "'rustscan -b <batch_size> -a <ip address>'");
         warning!(x, opts.greppable, opts.accessible);
     }
@@ -191,6 +194,23 @@ fn main() {
     benchmarks.push(rustscan_bench);
     debug!("Benchmarks raw {benchmarks:?}");
     info!("{}", benchmarks.summary());
+}
+
+/// Determines the actual batch size used by the scanner.
+///
+/// Unix systems may reduce the requested batch size according to the process
+/// file-descriptor limit. Other platforms, including Windows, use the batch
+/// size explicitly requested by the user.
+fn effective_batch_size(opts: &Opts) -> usize {
+    #[cfg(unix)]
+    {
+        infer_batch_size(opts, adjust_ulimit_size(opts))
+    }
+
+    #[cfg(not(unix))]
+    {
+        opts.batch_size
+    }
 }
 
 /// Prints the opening title of RustScan
@@ -299,6 +319,8 @@ fn infer_batch_size(opts: &Opts, ulimit: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::effective_batch_size;
     #[cfg(unix)]
     use super::{adjust_ulimit_size, infer_batch_size};
     use super::{print_opening, Opts};
@@ -369,11 +391,41 @@ mod tests {
 
     #[test]
     fn test_print_opening_no_panic() {
-        let opts = Opts {
-            ulimit: Some(2_000),
-            ..Default::default()
-        };
+        let opts = Opts::default();
         // print opening should not panic
         print_opening(&opts);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_batch_size_uses_requested_value() {
+        let opts = Opts {
+            batch_size: 50,
+            ..Default::default()
+        };
+
+        assert_eq!(effective_batch_size(&opts), 50);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_batch_size_preserves_large_requested_value() {
+        let opts = Opts {
+            batch_size: 12_345,
+            ..Default::default()
+        };
+
+        assert_eq!(effective_batch_size(&opts), 12_345);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_batch_size_preserves_single_connection() {
+        let opts = Opts {
+            batch_size: 1,
+            ..Default::default()
+        };
+
+        assert_eq!(effective_batch_size(&opts), 1);
     }
 }
