@@ -276,7 +276,7 @@ fn read_ips_from_file(
 #[cfg(test)]
 mod tests {
     use super::{parse_addresses, Opts};
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn parse_correct_addresses() {
@@ -380,5 +380,92 @@ mod tests {
         let ips = parse_addresses(&opts);
 
         assert_eq!(ips.len(), 256);
+    }
+
+    #[test]
+    fn parse_non_canonical_cidr_mid_block() {
+        // 192.168.1.13/29: .13 = 0000 1101, mask clears last 3 bits → .8 = 0000 1000
+        // network is 192.168.1.8/29, spanning .8 through .15
+        let opts = Opts {
+            addresses: vec!["192.168.1.13/29".to_owned()],
+            ..Default::default()
+        };
+        let ips = parse_addresses(&opts);
+        assert_eq!(
+            ips,
+            [
+                Ipv4Addr::new(192, 168, 1, 8),
+                Ipv4Addr::new(192, 168, 1, 9),
+                Ipv4Addr::new(192, 168, 1, 10),
+                Ipv4Addr::new(192, 168, 1, 11),
+                Ipv4Addr::new(192, 168, 1, 12),
+                Ipv4Addr::new(192, 168, 1, 13),
+                Ipv4Addr::new(192, 168, 1, 14),
+                Ipv4Addr::new(192, 168, 1, 15),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_non_canonical_cidr_last_in_block() {
+        // 192.168.1.15/29: last address in the block, should still resolve to same .8–.15 network
+        let opts = Opts {
+            addresses: vec!["192.168.1.15/29".to_owned()],
+            ..Default::default()
+        };
+        let ips = parse_addresses(&opts);
+        assert_eq!(
+            ips,
+            [
+                Ipv4Addr::new(192, 168, 1, 8),
+                Ipv4Addr::new(192, 168, 1, 9),
+                Ipv4Addr::new(192, 168, 1, 10),
+                Ipv4Addr::new(192, 168, 1, 11),
+                Ipv4Addr::new(192, 168, 1, 12),
+                Ipv4Addr::new(192, 168, 1, 13),
+                Ipv4Addr::new(192, 168, 1, 14),
+                Ipv4Addr::new(192, 168, 1, 15),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_non_canonical_cidr_crosses_third_octet() {
+        // 192.168.1.5/23: host bits span into the third octet
+        // .1.5 in 23-bit context → network is 192.168.0.0/23, spanning .0.0 through .1.255 (512 addresses)
+        let opts = Opts {
+            addresses: vec!["192.168.1.5/23".to_owned()],
+            ..Default::default()
+        };
+        let ips = parse_addresses(&opts);
+        assert_eq!(
+            ips.first(),
+            Some(&IpAddr::V4(Ipv4Addr::new(192, 168, 0, 0)))
+        );
+        assert_eq!(
+            ips.last(),
+            Some(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 255)))
+        );
+        assert_eq!(ips.len(), 512);
+    }
+
+    #[test]
+    fn parse_non_canonical_cidr_slash30() {
+        // 10.0.0.7/30: .7 = 0000 0111, mask clears last 2 bits → .4 = 0000 0100
+        // network is 10.0.0.4/30, spanning .4 through .7
+        let opts = Opts {
+            addresses: vec!["10.0.0.7/30".to_owned()],
+            ..Default::default()
+        };
+        let ips = parse_addresses(&opts);
+        assert_eq!(
+            ips,
+            [
+                Ipv4Addr::new(10, 0, 0, 4),
+                Ipv4Addr::new(10, 0, 0, 5),
+                Ipv4Addr::new(10, 0, 0, 6),
+                Ipv4Addr::new(10, 0, 0, 7),
+            ]
+        );
     }
 }
