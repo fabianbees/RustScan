@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use rustscan::generated::get_parsed_data;
-use rustscan::input::{Opts, PortRange, ScanOrder};
+use rustscan::input::{Opts, PortRanges, ScanOrder};
 use rustscan::port_strategy::PortStrategy;
 use rustscan::scanner::build_udp_payload_lookup;
 use std::collections::BTreeMap;
@@ -13,10 +13,7 @@ fn bench_address() {
 }
 
 fn bench_port_strategy() {
-    let range = PortRange {
-        start: 1,
-        end: 1_000,
-    };
+    let range = PortRanges(vec![(1, 1_000)]);
     let _strategy = PortStrategy::pick(&Some(range.clone()), None, ScanOrder::Serial);
 }
 

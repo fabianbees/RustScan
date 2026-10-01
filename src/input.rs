@@ -27,35 +27,94 @@ pub enum ScriptsRequired {
     Custom,
 }
 
-/// Represents the range of ports to be scanned.
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct PortRange {
-    pub start: u16,
-    pub end: u16,
+/// The port ranges to scan, as inclusive `(start, end)` pairs.
+///
+/// Parsed from `-r/--range` (e.g. `1-500,1000-2500`) and from the `range`
+/// key of the configuration file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortRanges(pub Vec<(u16, u16)>);
+
+/// Accepted spellings of `range` in the configuration file.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PortRangesConfig {
+    /// `range = { start = 1, end = 1000 }`: the format used before multiple
+    /// ranges were supported, kept so existing configuration files still work.
+    Single { start: u16, end: u16 },
+    /// `range = "1-500,1000-2500"`: the same syntax as `--range`.
+    Text(String),
+    /// `range = [[1, 500], [1000, 2500]]`.
+    Pairs(Vec<(u16, u16)>),
+}
+
+impl<'de> serde::Deserialize<'de> for PortRanges {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let pairs = match PortRangesConfig::deserialize(deserializer)? {
+            PortRangesConfig::Single { start, end } => vec![(start, end)],
+            PortRangesConfig::Text(text) => {
+                return parse_ranges(&text).map_err(serde::de::Error::custom)
+            }
+            PortRangesConfig::Pairs(pairs) => pairs,
+        };
+
+        if pairs.is_empty() {
+            return Err(serde::de::Error::custom("expected at least one port range"));
+        }
+        if let Some(&(start, end)) = pairs.iter().find(|&&(start, end)| start > end) {
+            return Err(serde::de::Error::custom(format!(
+                "invalid port range {start}-{end}: start must not be greater than end"
+            )));
+        }
+
+        Ok(PortRanges(pairs))
+    }
 }
 
 #[cfg(not(tarpaulin_include))]
-fn parse_range(input: &str) -> Result<PortRange, String> {
-    let range = input
-        .split('-')
-        .map(str::parse)
-        .collect::<Result<Vec<u16>, std::num::ParseIntError>>();
+/// Parse a single `start-end` token (e.g. "100-200") into `(start, end)`.
+/// Returns `None` when the token is malformed, cannot be parsed as `u16`,
+/// or `start > end`.
+fn parse_range(input: &str) -> Option<(u16, u16)> {
+    let mut parts = input.trim().splitn(2, '-').map(str::trim);
+    let a = parts.next()?;
+    let b = parts.next()?;
 
-    if range.is_err() {
-        return Err(String::from(
-            "the range format must be 'start-end'. Example: 1-1000.",
-        ));
+    let start = a.parse::<u16>().ok()?;
+    let end = b.parse::<u16>().ok()?;
+
+    if start <= end {
+        Some((start, end))
+    } else {
+        None
+    }
+}
+#[cfg(not(tarpaulin_include))]
+/// Parse a comma-separated list of `start-end` ranges into `PortRanges`.
+///
+/// Errors with a helpful message identifying the bad token.
+fn parse_ranges(input: &str) -> Result<PortRanges, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("empty input: expected one or more comma-separated 'start-end' pairs".into());
     }
 
-    match range.unwrap().as_slice() {
-        [start, end] => Ok(PortRange {
-            start: *start,
-            end: *end,
-        }),
-        _ => Err(String::from(
-            "the range format must be 'start-end'. Example: 1-1000.",
-        )),
-    }
+    let ranges_res: Result<Vec<(u16, u16)>, String> = s
+        .split(',')
+        .map(|token| {
+            let t = token.trim();
+            parse_range(t).ok_or_else(|| {
+                format!(
+                    "invalid range token `{}` — expected `start-end` with 0 <= start <= end <= 65535",
+                    t
+                )
+            })
+        })
+        .collect();
+
+    ranges_res.map(PortRanges)
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -80,9 +139,9 @@ pub struct Opts {
     #[arg(short, long, value_delimiter = ',')]
     pub ports: Option<Vec<u16>>,
 
-    /// A range of ports with format start-end. Example: 1-1000.
-    #[arg(short, long, conflicts_with = "ports", value_parser = parse_range)]
-    pub range: Option<PortRange>,
+    /// Ranges of ports as comma-separated start-end pairs. Example: 1-500,1000-2500,4000-7000
+    #[arg(short, long, conflicts_with = "ports", value_parser = parse_ranges)]
+    pub range: Option<PortRanges>,
 
     /// Whether to ignore the configuration file or not.
     #[arg(short, long)]
@@ -170,10 +229,7 @@ impl Opts {
         let mut opts = Opts::parse();
 
         if opts.ports.is_none() && opts.range.is_none() {
-            opts.range = Some(PortRange {
-                start: LOWEST_PORT_NUMBER,
-                end: TOP_PORT_NUMBER,
-            });
+            opts.range = Some(PortRanges(vec![(LOWEST_PORT_NUMBER, TOP_PORT_NUMBER)]));
         }
 
         opts
@@ -281,7 +337,7 @@ impl Default for Opts {
 pub struct Config {
     addresses: Option<Vec<String>>,
     ports: Option<Vec<u16>>,
-    range: Option<PortRange>,
+    range: Option<PortRanges>,
     greppable: Option<bool>,
     accessible: Option<bool>,
     batch_size: Option<usize>,
@@ -388,7 +444,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use parameterized::parameterized;
 
-    use super::{Config, Opts, PortRange, ScanOrder, ScriptsRequired};
+    use super::{Config, Opts, PortRanges, ScanOrder, ScriptsRequired};
 
     impl Config {
         fn default() -> Self {
@@ -550,10 +606,7 @@ mod tests {
     fn opts_merge_optional_arguments() {
         let mut opts = Opts::default();
         let mut config = Config::default();
-        config.range = Some(PortRange {
-            start: 1,
-            end: 1_000,
-        });
+        config.range = Some(PortRanges(vec![(1, 1_000)]));
         config.ulimit = Some(1_000);
         config.resolver = Some("1.1.1.1".to_owned());
 
@@ -562,5 +615,66 @@ mod tests {
         assert_eq!(opts.range, config.range);
         assert_eq!(opts.ulimit, config.ulimit);
         assert_eq!(opts.resolver, config.resolver);
+    }
+
+    #[test]
+    fn parses_comma_separated_ranges() {
+        let opts = Opts::parse_from([
+            "rustscan",
+            "-a",
+            "127.0.0.1",
+            "-r",
+            "1-100, 200-300,5000-5100",
+        ]);
+
+        assert_eq!(
+            opts.range,
+            Some(PortRanges(vec![(1, 100), (200, 300), (5_000, 5_100)]))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_ranges() {
+        for range in ["", "300-200", "1-100,", "1-2-3", "a-b", "1-70000"] {
+            assert!(
+                Opts::try_parse_from(["rustscan", "-a", "127.0.0.1", "-r", range]).is_err(),
+                "{:?} should be rejected",
+                range
+            );
+        }
+    }
+
+    #[test]
+    fn config_range_accepts_legacy_table() {
+        let config: Config = toml::from_str("range = { start = 1, end = 1000 }").unwrap();
+
+        assert_eq!(config.range, Some(PortRanges(vec![(1, 1_000)])));
+    }
+
+    #[test]
+    fn config_range_accepts_string_and_pairs() {
+        let expected = Some(PortRanges(vec![(1, 100), (200, 300)]));
+
+        let config: Config = toml::from_str("range = \"1-100,200-300\"").unwrap();
+        assert_eq!(config.range, expected);
+
+        let config: Config = toml::from_str("range = [[1, 100], [200, 300]]").unwrap();
+        assert_eq!(config.range, expected);
+    }
+
+    #[test]
+    fn config_range_rejects_invalid_ranges() {
+        for range in [
+            "range = { start = 10, end = 1 }",
+            "range = [[10, 1]]",
+            "range = []",
+            "range = \"10-1\"",
+        ] {
+            assert!(
+                toml::from_str::<Config>(range).is_err(),
+                "{:?} should be rejected",
+                range
+            );
+        }
     }
 }
