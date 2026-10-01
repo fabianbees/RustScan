@@ -222,7 +222,8 @@ pub struct Opts {
     #[arg(long)]
     pub udp: bool,
 
-    /// Also show closed Ports
+    /// Also list TCP ports that actively refused the connection (closed).
+    /// Closed ports are only printed; scripts are never run against them.
     #[arg(long)]
     pub closed: bool,
 }
